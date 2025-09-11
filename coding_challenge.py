@@ -20,7 +20,10 @@ import sys
 from pathlib import Path
 from data_utils import load_nypd_csvs, filter_crashes, save_if_missing, merge_monthly_csvs
 from shapely.geometry import Point, box
-
+from astral.sun import sun
+from astral import LocationInfo
+from meteostat import Point, Hourly
+import datetime as dt
 #####################################################################################################################
 ####################################    LOADING DATA  ###############################################################
 #####################################################################################################################
@@ -241,6 +244,91 @@ total_monthly_bike_cost_casual = costs_monthly_crash_bike_casual + monthly_cityb
 
 total_monthly_ebike_cost_member = costs_monthly_crash_ebike_member + monthly_citybike_ebike_injured_cost_member
 total_monthly_ebike_cost_casual = costs_monthly_crash_ebike_casual + monthly_citybike_ebike_injured_cost_casual
+
+#####################################################################################################################
+####################################    DAY vs NIGHT CRASHES  #######################################################
+#####################################################################################################################
+# ---- NYC Location ----
+nyc = LocationInfo("New York", "USA", "US/Eastern", 40.7128, -74.0060)
+for df in [df_bike, df_ebike]:
+    df["CRASH_DATETIME"] = pd.to_datetime(df["CRASH DATE"].astype(str) + " " + df["CRASH TIME"].astype(str), errors="coerce").dt.tz_localize("US/Eastern", nonexistent="shift_forward", ambiguous="NaT")
+
+# ---- Funktion: Nachtunfall? ----
+def is_night(crash_dt):
+    if pd.isna(crash_dt):
+        return False
+    s = sun(nyc.observer, date=crash_dt.date(), tzinfo=nyc.timezone)
+    sunrise, sunset = s["sunrise"], s["sunset"]
+    return crash_dt < sunrise or crash_dt > sunset
+
+# ---- Neue Spalte: NIGHT_CRASH ----
+df_bike["NIGHT_CRASH"] = df_bike["CRASH_DATETIME"].apply(is_night)
+df_ebike["NIGHT_CRASH"] = df_ebike["CRASH_DATETIME"].apply(is_night)
+
+# ---- 2023 filtern ----
+bike_2023 = df_bike[df_bike["CRASH_DATETIME"].dt.year == 2023].copy()
+ebike_2023 = df_ebike[df_ebike["CRASH_DATETIME"].dt.year == 2023].copy()
+
+# ---- Monatsstatistik ----
+bike_day_night = (bike_2023.groupby([bike_2023["CRASH_DATETIME"].dt.month, "NIGHT_CRASH"]).size().unstack(fill_value=0).rename(columns={False: "Day", True: "Night"}))
+ebike_day_night = (ebike_2023.groupby([ebike_2023["CRASH_DATETIME"].dt.month, "NIGHT_CRASH"]).size().unstack(fill_value=0).rename(columns={False: "Day", True: "Night"}))
+
+#####################################################################################################################
+####################################    RAIN/NOT RAIN  ##############################################################
+#####################################################################################################################
+# ---- NYC Location ----
+nyc = LocationInfo("New York", "USA", "US/Eastern", 40.7128, -74.0060)
+nyc_point = Point(40.7128, -74.0060)
+
+# ---- Crash datetime (timezone-aware) ----
+for df in [df_bike, df_ebike]:
+    df["CRASH_DATETIME"] = pd.to_datetime(df["CRASH DATE"].astype(str) + " " + df["CRASH TIME"].astype(str), errors="coerce").dt.tz_localize("US/Eastern", nonexistent="shift_forward", ambiguous="NaT")
+df_bike["CRASH_HOUR"] = df_bike["CRASH_DATETIME"].dt.floor("h")
+df_ebike["CRASH_HOUR"] = df_ebike["CRASH_DATETIME"].dt.floor("h")
+
+start = pd.Timestamp("2023-01-01 00:00:00")
+end   = pd.Timestamp("2023-12-31 23:59:59")
+weather = Hourly(nyc_point, start, end).fetch()
+weather.index = weather.index.tz_localize("UTC").tz_convert("US/Eastern")
+
+
+df_bike = df_bike.merge(weather[["prcp"]], left_on="CRASH_HOUR", right_index=True, how="left")
+df_ebike = df_ebike.merge(weather[["prcp"]], left_on="CRASH_HOUR", right_index=True, how="left")
+df_bike["RAINING"] = df_bike["prcp"] > 0
+df_ebike["RAINING"] = df_ebike["prcp"] > 0
+
+bike_2023 = df_bike[df_bike["CRASH_DATETIME"].dt.year == 2023].copy()
+ebike_2023 = df_ebike[df_ebike["CRASH_DATETIME"].dt.year == 2023].copy()
+
+
+bike_rain_stats = (bike_2023.groupby([bike_2023["CRASH_DATETIME"].dt.month, "RAINING"]).size().unstack(fill_value=0).rename(columns={False: "Dry", True: "Rain"}))
+ebike_rain_stats = (ebike_2023.groupby([ebike_2023["CRASH_DATETIME"].dt.month, "RAINING"]).size().unstack(fill_value=0).rename(columns={False: "Dry", True: "Rain"}))
+
+# ---- Regentage pro Monat zählen ----
+# Meteostat gibt Stundenwerte; wir summieren auf Tagesebene
+daily_prcp = weather["prcp"].resample("D").sum()
+
+# Ein Regentag = Tagesniederschlag > 0 mm
+rainy_days = (daily_prcp > 0).resample("ME").sum()
+
+# Index zu Monat umwandeln
+rainy_days = rainy_days.reset_index()
+rainy_days["Month"] = rainy_days["time"].dt.month
+rainy_days = rainy_days.groupby("Month")["prcp"].sum().rename("RainyDays")
+
+# Unfälle pro Tag zählen
+bike_daily = df_bike.groupby(df_bike["CRASH_DATETIME"].dt.date).size()
+ebike_daily = df_ebike.groupby(df_ebike["CRASH_DATETIME"].dt.date).size()
+
+# DataFrame mit Regen und Unfällen
+daily_corr_df = pd.DataFrame({
+    "Precipitation": daily_prcp.values,
+    "BikeCrashes": bike_daily.reindex(daily_prcp.index.date, fill_value=0).values,
+    "EBikeCrashes": ebike_daily.reindex(daily_prcp.index.date, fill_value=0).values
+}, index=daily_prcp.index)
+
+print(daily_corr_df.corr(method="pearson"))
+
 #####################################################################################################################
 #####################################################    PLOTS  #####################################################
 #####################################################################################################################
@@ -563,6 +651,83 @@ for ax in axes:
 
 plt.tight_layout()
 plt.savefig(output_folder_figures / "citybike_total_costs_member_vs_casual.png", dpi=300)
+
+
+
+# ===================== Plot DAY/NIGHT =====================
+
+fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+bar_width = 0.35
+
+# ---- Bike ----
+axes[0].bar(bike_day_night.index - bar_width/2, bike_day_night["Day"], width=bar_width, label="Day", color="orange")
+axes[0].bar(bike_day_night.index + bar_width/2, bike_day_night["Night"], width=bar_width, label="Night", color="navy")
+axes[0].set_title("Bike Crashes Day vs Night (2023)", fontsize=16)
+axes[0].set_ylabel("Number of Crashes")
+axes[0].legend()
+axes[0].grid(axis="y", linestyle="--", alpha=0.5)
+
+# ---- E-Bike ----
+axes[1].bar(ebike_day_night.index - bar_width/2, ebike_day_night["Day"], width=bar_width, label="Day", color="orange")
+axes[1].bar(ebike_day_night.index + bar_width/2, ebike_day_night["Night"], width=bar_width, label="Night", color="navy")
+axes[1].set_title("E-Bike Crashes Day vs Night (2023)", fontsize=16)
+axes[1].set_xlabel("Month")
+axes[1].set_ylabel("Number of Crashes")
+axes[1].legend()
+axes[1].grid(axis="y", linestyle="--", alpha=0.5)
+
+plt.xticks(range(1, 13))
+plt.tight_layout()
+plt.savefig(output_folder_figures / "day_vs_night_crashes.png", dpi=300, bbox_inches="tight")
+print("✅ Day vs Night crashes analysis completed")
+
+# ===================== Plot RAIN/NOT RAIN =====================
+# ---- Plot mit Regentagen ----
+fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+bar_width = 0.35
+
+# Bike crashes
+axes[0].bar(bike_rain_stats.index - bar_width/2, bike_rain_stats["Dry"], width=bar_width, label="Dry", color="skyblue")
+axes[0].bar(bike_rain_stats.index + bar_width/2, bike_rain_stats["Rain"], width=bar_width, label="Rain", color="navy")
+axes[0].set_title("Bike Crashes in Dry vs Rain (2023)", fontsize=16)
+axes[0].set_ylabel("Number of Crashes")
+axes[0].legend(loc="upper left")
+axes[0].grid(axis="y", linestyle="--", alpha=0.5)
+
+# zweite Achse für Regentage
+ax2 = axes[0].twinx()
+ax2.plot(rainy_days.index, rainy_days.values, color="black", marker="o", linestyle="-", label="Rainy Days")
+ax2.set_ylabel("Rainy Days")
+ax2.legend(loc="upper right")
+
+# E-Bike crashes
+axes[1].bar(ebike_rain_stats.index - bar_width/2, ebike_rain_stats["Dry"], width=bar_width, label="Dry", color="orange")
+axes[1].bar(ebike_rain_stats.index + bar_width/2, ebike_rain_stats["Rain"], width=bar_width, label="Rain", color="red")
+axes[1].set_title("E-Bike Crashes in Dry vs Rain (2023)", fontsize=16)
+axes[1].set_xlabel("Month")
+axes[1].set_ylabel("Number of Crashes")
+axes[1].legend(loc="upper left")
+axes[1].grid(axis="y", linestyle="--", alpha=0.5)
+
+ax3 = axes[1].twinx()
+ax3.plot(rainy_days.index, rainy_days.values, color="black", marker="o", linestyle="-", label="Rainy Days")
+ax3.set_ylabel("Rainy Days")
+ax3.legend(loc="upper right")
+
+plt.xticks(range(1, 13))
+plt.tight_layout()
+plt.savefig(output_folder_figures / "rain_vs_dry_crashes_with_rainydays.png", dpi=300, bbox_inches="tight")
+
+
+plt.figure(figsize=(8,6))   # <<< neues Figure starten
+plt.scatter(daily_corr_df["Precipitation"], daily_corr_df["BikeCrashes"], alpha=0.5, label="Bike")
+plt.scatter(daily_corr_df["Precipitation"], daily_corr_df["EBikeCrashes"], alpha=0.5, label="E-Bike", color="red")
+plt.xlabel("Precipitation (mm)")
+plt.ylabel("Crashes")
+plt.title("Crashes vs Precipitation (Daily, 2023)")
+plt.legend()
+plt.grid(True, linestyle="--", alpha=0.5)
+plt.savefig(output_folder_figures / "Precipitation_vs_crashes.png", dpi=300, bbox_inches="tight")
 
 
 
