@@ -19,6 +19,7 @@ import matplotlib.colors as mcolors # type: ignore
 import sys
 from pathlib import Path
 from data_utils import load_nypd_csvs, filter_crashes, save_if_missing, merge_monthly_csvs
+from shapely.geometry import Point, box
 
 #####################################################################################################################
 ####################################    LOADING DATA  ###############################################################
@@ -208,10 +209,11 @@ monthly_citybike_bike_crashes_casual = monthly_citybike_bike_crashes * casual_fr
 monthly_citybike_ebike_crashes_member = monthly_citybike_ebike_crashes * member_fraction
 monthly_citybike_ebike_crashes_casual = monthly_citybike_ebike_crashes * casual_fraction
 #####################################################################################################################
-###########################################    COST OF CRASHES  ''''''###############################################
+###########################################    COST OF CRASHES  #####################################################
 #####################################################################################################################
 cost_of_bike = 1500
-cost_of_ebike = 1500
+cost_of_ebike = 2500
+cost_of_injured = 8000
 
 costs_monthly_crash_bike_member =  monthly_citybike_bike_crashes_member * cost_of_bike
 costs_monthly_crash_bike_casual =  monthly_citybike_bike_crashes_casual * cost_of_bike
@@ -219,6 +221,26 @@ costs_monthly_crash_bike_casual =  monthly_citybike_bike_crashes_casual * cost_o
 costs_monthly_crash_ebike_member =  monthly_citybike_ebike_crashes_member * cost_of_ebike
 costs_monthly_crash_ebike_casual =  monthly_citybike_ebike_crashes_casual * cost_of_ebike
 
+monthly_citybike_bike_injured = monthly_injured_bikes["Injured"] * citybike_fraction
+monthly_citybike_ebike_injured = monthly_injured_ebikes["Injured"] * citybike_fraction
+
+monthly_citybike_bike_injured_member = monthly_citybike_bike_injured * member_fraction
+monthly_citybike_bike_injured_casual = monthly_citybike_bike_injured * casual_fraction
+
+monthly_citybike_ebike_injured_member = monthly_citybike_ebike_injured * member_fraction
+monthly_citybike_ebike_injured_casual = monthly_citybike_ebike_injured * casual_fraction
+
+monthly_citybike_bike_injured_cost_member = monthly_citybike_bike_injured_member * cost_of_injured
+monthly_citybike_bike_injured_cost_casual = monthly_citybike_bike_injured_casual * cost_of_injured
+
+monthly_citybike_ebike_injured_cost_member = monthly_citybike_ebike_injured_member * cost_of_injured
+monthly_citybike_ebike_injured_cost_casual = monthly_citybike_ebike_injured_casual * cost_of_injured
+
+total_monthly_bike_cost_member = costs_monthly_crash_bike_member + monthly_citybike_bike_injured_cost_member
+total_monthly_bike_cost_casual = costs_monthly_crash_bike_casual + monthly_citybike_bike_injured_cost_casual
+
+total_monthly_ebike_cost_member = costs_monthly_crash_ebike_member + monthly_citybike_ebike_injured_cost_member
+total_monthly_ebike_cost_casual = costs_monthly_crash_ebike_casual + monthly_citybike_ebike_injured_cost_casual
 #####################################################################################################################
 #####################################################    PLOTS  #####################################################
 #####################################################################################################################
@@ -350,7 +372,7 @@ axes[0].bar(months, unfallquote_bike_citybike, color="skyblue", label="Bike Unfa
 #axes[0].axhline(avg_unfallquote_bike_ny, color="grey", linestyle="--", linewidth=2)
 #axes[0].axhline(avg_unfallquote_bike_citybike, color="skyblue", linestyle="--", linewidth=2)
 axes[0].text(-0.9, avg_unfallquote_bike_ny, f"Mean = {avg_unfallquote_bike_ny:.3f}[ppm]", color="black", fontsize=12, va="bottom")
-axes[0].text(-0.9, avg_unfallquote_bike_ny -5, f"Fraction Citybike = {citybike_fraction:.3f}[%]", color="black", fontsize=12, va="bottom")
+axes[0].text(-0.9, avg_unfallquote_bike_ny -5, f"Fraction Citybike = {citybike_fraction*100:.2f}[%]", color="black", fontsize=12, va="bottom")
 #axes[0].text(-0.9, avg_unfallquote_bike_citybike, f"Mean = {avg_unfallquote_bike_citybike:.3f}[ppm]", color="black", fontsize=12, va="bottom")
 axes[0].set_ylabel("Unfallquote [ppm]", fontsize=14)
 axes[0].set_title("Unfallquote Classic Bike in [ppm](2023)", fontsize=16)
@@ -363,7 +385,7 @@ axes[1].bar(months, unfallquote_ebike_citybike, color="lightcoral", label="E-Bik
 #axes[1].axhline(avg_unfallquote_ebike_ny, color="grey", linestyle="--", linewidth=2)
 #axes[1].axhline(avg_unfallquote_ebike_citybike, color="lightcoral", linestyle="--", linewidth=2)
 axes[1].text(-0.9, avg_unfallquote_ebike_ny, f"Mean = {avg_unfallquote_ebike_ny:.3f}[ppm]", color="black", fontsize=12, va="bottom")
-axes[1].text(-0.9, avg_unfallquote_ebike_ny -5, f"Fraction Citybike = {citybike_fraction:.3f}[%]", color="black", fontsize=12, va="bottom")
+axes[1].text(-0.9, avg_unfallquote_ebike_ny -5, f"Fraction Citybike = {citybike_fraction*100:.2f}[%]", color="black", fontsize=12, va="bottom")
 #axes[1].text(-0.9, avg_unfallquote_ebike_citybike, f"Mean = {avg_unfallquote_ebike_citybike:.3f}[ppm]", color="black", fontsize=12, va="bottom")
 axes[1].set_xlabel("Monat", fontsize=14)
 axes[1].set_ylabel("Unfallquote [ppm]", fontsize=14)
@@ -491,9 +513,56 @@ for i, (m, c) in enumerate(zip(costs_monthly_crash_ebike_member, costs_monthly_c
 plt.xticks(df_member["Month"])
 plt.tight_layout()
 plt.savefig(output_folder_figures / "citybike_crash_costs_member_vs_casual.png", dpi=300)
-plt.show()
 
+########################################    Costs Crashes Injured #############################################
+total_monthly_bike_cost_member = costs_monthly_crash_bike_member + monthly_citybike_bike_injured_cost_member
+total_monthly_bike_cost_casual = costs_monthly_crash_bike_casual + monthly_citybike_bike_injured_cost_casual
 
+total_monthly_ebike_cost_member = costs_monthly_crash_ebike_member + monthly_citybike_ebike_injured_cost_member
+total_monthly_ebike_cost_casual = costs_monthly_crash_ebike_casual + monthly_citybike_ebike_injured_cost_casual
+
+# ===================== Plot Monthly Costs =====================
+fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+bar_width = 0.35
+
+# -------- Bike Costs --------
+axes[0].bar(df_member["Month"] - bar_width/2, total_monthly_bike_cost_member, width=bar_width,
+            label=f"Member Total = ${total_monthly_bike_cost_member.sum():,.0f}", color="steelblue")
+axes[0].bar(df_member["Month"] + bar_width/2, total_monthly_bike_cost_casual, width=bar_width,
+            label=f"Casual Total = ${total_monthly_bike_cost_casual.sum():,.0f}", color="orange")
+axes[0].set_ylabel("Cost of Crashes + Injured [USD]")
+axes[0].set_title("Monthly Total Cost: Classic Bike (2023)")
+axes[0].grid(axis="y", linestyle="--", alpha=0.5)
+axes[0].legend(loc="upper left", fontsize=12)
+
+# Add cost labels above bars
+for i, (m, c) in enumerate(zip(total_monthly_bike_cost_member, total_monthly_bike_cost_casual)):
+    axes[0].text(df_member["Month"][i] - bar_width/2, m + 50, f"${m:,.0f}", ha="center", fontsize=9)
+    axes[0].text(df_member["Month"][i] + bar_width/2, c + 50, f"${c:,.0f}", ha="center", fontsize=9)
+
+# -------- E-Bike Costs --------
+axes[1].bar(df_member["Month"] - bar_width/2, total_monthly_ebike_cost_member, width=bar_width,
+            label=f"Member Total = ${total_monthly_ebike_cost_member.sum():,.0f}", color="steelblue")
+axes[1].bar(df_member["Month"] + bar_width/2, total_monthly_ebike_cost_casual, width=bar_width,
+            label=f"Casual Total = ${total_monthly_ebike_cost_casual.sum():,.0f}", color="orange")
+axes[1].set_ylabel("Cost of Crashes + Injured [USD]")
+axes[1].set_title("Monthly Total Cost: E-Bike (2023)")
+axes[1].set_xlabel("Month")
+axes[1].grid(axis="y", linestyle="--", alpha=0.5)
+axes[1].legend(loc="upper left", fontsize=12)
+
+# Add cost labels above bars
+for i, (m, c) in enumerate(zip(total_monthly_ebike_cost_member, total_monthly_ebike_cost_casual)):
+    axes[1].text(df_member["Month"][i] - bar_width/2, m + 50, f"${m:,.0f}", ha="center", fontsize=9)
+    axes[1].text(df_member["Month"][i] + bar_width/2, c + 50, f"${c:,.0f}", ha="center", fontsize=9)
+
+# X-axis ticks
+plt.xticks(df_member["Month"])
+for ax in axes:
+    ax.set_xlim(-1, 14)
+
+plt.tight_layout()
+plt.savefig(output_folder_figures / "citybike_total_costs_member_vs_casual.png", dpi=300)
 
 
 
